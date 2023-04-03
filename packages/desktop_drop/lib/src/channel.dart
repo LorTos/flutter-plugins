@@ -8,7 +8,10 @@ import 'drop_item.dart';
 import 'events.dart';
 import 'utils/platform.dart' if (dart.library.html) 'utils/platform_web.dart';
 
-typedef RawDropListener = void Function(DropEvent);
+abstract class RawDropListener {
+  void onEvent(DropEvent event);
+  bool isInBounds(DropEvent event);
+}
 
 class DesktopDrop {
   static const MethodChannel _channel = MethodChannel('desktop_drop');
@@ -19,51 +22,48 @@ class DesktopDrop {
 
   final _listeners = <RawDropListener>{};
 
-  var _inited = false;
+  var _initialized = false;
 
   Offset? _offset;
 
   void init() {
-    if (_inited) {
+    if (_initialized) {
       return;
     }
-    _inited = true;
-    _channel.setMethodCallHandler((call) async {
-      try {
-        return await _handleMethodChannel(call);
-      } catch (e, s) {
-        debugPrint('_handleMethodChannel: $e $s');
-      }
-    });
+    _initialized = true;
+    _channel.setMethodCallHandler(
+      (call) async {
+        try {
+          return await _handleMethodChannel(call);
+        } catch (e, s) {
+          debugPrint('_handleMethodChannel: $e $s');
+        }
+      },
+    );
   }
 
   Future<void> _handleMethodChannel(MethodCall call) async {
     switch (call.method) {
       case "entered":
-        assert(_offset == null);
         final position = (call.arguments as List).cast<double>();
         _offset = Offset(position[0], position[1]);
         _notifyEvent(DropEnterEvent(location: _offset!));
         break;
       case "updated":
-        if (_offset == null && Platform.isLinux) {
-          final position = (call.arguments as List).cast<double>();
-          _offset = Offset(position[0], position[1]);
-          _notifyEvent(DropEnterEvent(location: _offset!));
-          return;
-        }
-        assert(_offset != null);
         final position = (call.arguments as List).cast<double>();
+        final previousOffset = _offset;
         _offset = Offset(position[0], position[1]);
-        _notifyEvent(DropUpdateEvent(location: _offset!));
+        if (previousOffset == null) {
+          _notifyEvent(DropEnterEvent(location: _offset!));
+        } else {
+          _notifyEvent(DropUpdateEvent(location: _offset!));
+        }
         break;
       case "exited":
-        assert(_offset != null);
         _notifyEvent(DropExitEvent(location: _offset ?? Offset.zero));
         _offset = null;
         break;
       case "performOperation":
-        assert(_offset != null);
         final paths = (call.arguments as List).cast<String>();
         _notifyEvent(
           DropDoneEvent(
@@ -75,10 +75,8 @@ class DesktopDrop {
         break;
       case "performOperation_linux":
         // gtk notify 'exit' before 'performOperation'.
-        assert(_offset == null);
         final text = (call.arguments as List<dynamic>)[0] as String;
-        final offset = ((call.arguments as List<dynamic>)[1] as List<dynamic>)
-            .cast<double>();
+        final offset = ((call.arguments as List<dynamic>)[1] as List<dynamic>).cast<double>();
         final paths = const LineSplitter().convert(text).map((e) {
           try {
             return Uri.tryParse(e)?.toFilePath() ?? '';
@@ -93,7 +91,6 @@ class DesktopDrop {
         ));
         break;
       case "performOperation_web":
-        assert(_offset != null);
         final results = (call.arguments as List)
             .cast<Map>()
             .map((e) => WebDropItem.fromJson(e.cast<String, dynamic>()))
@@ -116,9 +113,19 @@ class DesktopDrop {
   }
 
   void _notifyEvent(DropEvent event) {
-    for (final listener in _listeners) {
-      listener(event);
+    final reversedListeners = _listeners.toList(growable: false).reversed;
+    var foundTargetListener = false;
+    for (final listener in reversedListeners) {
+      final isInBounds = listener.isInBounds(event);
+      if (isInBounds && !foundTargetListener) {
+        foundTargetListener = true;
+        listener.onEvent(event);
+      } else {
+        listener.onEvent(DropExitEvent(location: event.location));
+      }
     }
+
+    _channel.invokeMethod('updateDroppableStatus', foundTargetListener);
   }
 
   void addRawDropEventListener(RawDropListener listener) {
